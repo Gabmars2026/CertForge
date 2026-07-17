@@ -1,0 +1,704 @@
+#!/usr/bin/env python3
+"""Generate linux_samples.js — 100 Linux+ (XK0-006 V8) command/script examples
+spanning CORE -> INTER -> ADV across the five exam domains. Emits
+window.LINUX_SAMPLES = [...]. Mirrors the structure/format of gen_samples.py
+(the Cisco generator) exactly, including the EXPLAIN label grammar so the
+existing UI parser (see template.html ssExplain()) works unchanged:
+  WHY IT WORKS: ...   [WHY A VARIANT FAILS: ...]   [WHY IT MATTERS: ...]
+"""
+import json
+
+S = []  # each: {id,title,level,cat,purpose,config(list of lines),explain}
+
+
+def add(title, level, cat, purpose, cfg, explain):
+    S.append({"id": len(S) + 1, "title": title, "level": level,
+              "cat": cat, "purpose": purpose, "config": cfg, "explain": explain})
+
+
+# =====================================================================
+# DOMAIN 1: System Management (~23) — boot, FHS, kernel modules,
+# partitioning, filesystems, LVM, RAID, swap, hardware, virtualization
+# =====================================================================
+
+add("Inspect GRUB2 config", "CORE", "System Management",
+    "Locate and review the active GRUB2 configuration.",
+    ["ls /boot/grub2/", "cat /boot/grub2/grub.cfg | head -30",
+     "grubby --default-kernel"],
+    "WHY IT WORKS: GRUB2's runtime config is generated (not hand-edited) from /etc/default/grub and /etc/grub.d/ scripts via grub2-mkconfig, so grub.cfg reflects the current kernel list and boot options. `grubby --default-kernel` reports which kernel actually boots by default. WHY A VARIANT FAILS: editing grub.cfg directly works until the next `grub2-mkconfig` run silently overwrites your changes — always edit /etc/default/grub and regenerate.")
+
+add("Regenerate GRUB2 config", "CORE", "System Management",
+    "Persist a kernel parameter change into the boot loader.",
+    ["sudo vi /etc/default/grub", "# add/edit: GRUB_CMDLINE_LINUX=\"quiet net.ifnames=0\"",
+     "sudo grub2-mkconfig -o /boot/grub2/grub.cfg"],
+    "WHY IT WORKS: GRUB_CMDLINE_LINUX in /etc/default/grub supplies kernel boot parameters; `grub2-mkconfig` regenerates grub.cfg from that file plus the installed kernel list. WHY A VARIANT FAILS: on UEFI systems the output path differs (/boot/efi/EFI/<distro>/grub.cfg) — writing to the BIOS path leaves the real config untouched and the change never takes effect.")
+
+add("Boot into rescue/emergency target", "INTER", "System Management",
+    "Force a single kernel parameter to drop into emergency mode for repair.",
+    ["# at the GRUB menu, press 'e' on the kernel line, then append:",
+     "systemd.unit=emergency.target",
+     "# press Ctrl-X / F10 to boot"],
+    "WHY IT WORKS: appending systemd.unit=emergency.target (or rescue.target) at boot overrides the default target for that single boot, mounting root read-only with a minimal set of services — ideal for fixing fstab or password issues. WHY IT MATTERS: emergency.target skips even local-fs mounting beyond root, while rescue.target mounts local filesystems and starts more services; pick emergency for fstab repairs.")
+
+add("List and change systemd default target", "CORE", "System Management",
+    "Check and set the boot target (runlevel equivalent).",
+    ["systemctl get-default", "sudo systemctl set-default multi-user.target",
+     "systemctl list-units --type=target"],
+    "WHY IT WORKS: systemd targets replace SysV runlevels; `set-default` symlinks /etc/systemd/system/default.target to the chosen target so it's used on the next boot. WHY A VARIANT FAILS: setting default to graphical.target on a headless server with no display manager installed leaves the boot stuck waiting on a unit that can never start.")
+
+add("List loaded kernel modules", "CORE", "System Management",
+    "Show currently loaded modules and inspect one.",
+    ["lsmod | head", "modinfo e1000e", "lsmod | grep -i nvme"],
+    "WHY IT WORKS: `lsmod` reads /proc/modules to list what's loaded right now; `modinfo` reads the module file itself for description, params and dependencies without loading it. WHY IT MATTERS: modinfo works even on modules that are NOT currently loaded, which is useful for checking compatibility before loading one.")
+
+add("Load, unload and persist a kernel module", "INTER", "System Management",
+    "Insert a module, remove it, and make it load at every boot.",
+    ["sudo modprobe nvme", "lsmod | grep nvme", "sudo modprobe -r nvme",
+     "echo nvme | sudo tee /etc/modules-load.d/nvme.conf"],
+    "WHY IT WORKS: `modprobe` (unlike `insmod`) resolves and loads dependencies automatically from the module dependency database; writing the module name to /etc/modules-load.d/ tells systemd to load it at every boot. WHY A VARIANT FAILS: using `rmmod` instead of `modprobe -r` on a module that other modules depend on fails with 'in use' rather than cleanly unwinding the dependency chain.")
+
+add("Blacklist a kernel module", "INTER", "System Management",
+    "Prevent a problematic driver from auto-loading.",
+    ["echo \"blacklist nouveau\" | sudo tee /etc/modprobe.d/blacklist-nouveau.conf",
+     "sudo dracut --force   # or: sudo update-initramfs -u",
+     "sudo reboot"],
+    "WHY IT WORKS: a file under /etc/modprobe.d/ with `blacklist <module>` stops modprobe from auto-loading it via alias resolution; rebuilding the initramfs is required if the module is baked into early boot. WHY A VARIANT FAILS: blacklisting alone doesn't help if another module hard-depends on it, or if the module is already compiled into the initramfs image — you must regenerate initramfs and reboot.")
+
+add("Rebuild initramfs after driver change", "INTER", "System Management",
+    "Regenerate the initial RAM filesystem for the current kernel.",
+    ["sudo dracut -f /boot/initramfs-$(uname -r).img $(uname -r)",
+     "# Debian/Ubuntu equivalent:",
+     "sudo update-initramfs -u -k all"],
+    "WHY IT WORKS: initramfs is a small filesystem loaded into RAM by the boot loader before the real root is mounted — it contains drivers/tools needed to find and mount root (e.g. LVM, RAID, NVMe, encryption). Changes to modules, LVM or /etc/crypttab require rebuilding it. WHY A VARIANT FAILS: forgetting to rebuild initramfs after adding a root-on-LVM or root-on-RAID module means the new kernel can boot but can't find/assemble the root device.")
+
+add("Identify the Filesystem Hierarchy Standard layout", "CORE", "System Management",
+    "Inspect key FHS directories and their purposes.",
+    ["ls -ld /etc /var /usr /opt /srv /tmp",
+     "df -h /var /usr", "ls /var/log | head"],
+    "WHY IT WORKS: the FHS defines fixed roles — /etc for host config, /var for variable runtime data (logs, spools, caches), /usr for shared read-only program files, /opt for third-party self-contained packages, /srv for served data. Following it lets any admin or tool predict where things live. WHY IT MATTERS: putting large log data on a small root partition (rather than a separate /var) is a classic cause of a filled-up root disk hanging the whole system.")
+
+add("List block devices and partitions", "CORE", "System Management",
+    "Enumerate disks, partitions, filesystems and mountpoints.",
+    ["lsblk -f", "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT",
+     "cat /proc/partitions"],
+    "WHY IT WORKS: `lsblk` reads sysfs to build a tree of block devices, partitions and their filesystem/mount info in one readable view — the modern replacement for parsing /proc/partitions by hand. WHY IT MATTERS: the -f flag adds filesystem type and UUID, which you need before writing /etc/fstab entries.")
+
+add("Partition a disk with fdisk (MBR)", "CORE", "System Management",
+    "Create a primary partition using the classic MBR tool.",
+    ["sudo fdisk /dev/sdb", "# n (new), p (primary), accept defaults, w (write)",
+     "sudo partprobe /dev/sdb", "lsblk /dev/sdb"],
+    "WHY IT WORKS: fdisk edits the MBR partition table interactively; 'w' commits the change to disk, and `partprobe` tells the kernel to re-read the partition table without a reboot. WHY A VARIANT FAILS: forgetting to press 'w' means all your changes are discarded on quit — fdisk stages changes in memory until you explicitly write them.")
+
+add("Partition a disk with parted (GPT, scriptable)", "INTER", "System Management",
+    "Create a GPT label and partition non-interactively.",
+    ["sudo parted /dev/sdb mklabel gpt",
+     "sudo parted /dev/sdb mkpart primary ext4 1MiB 100%",
+     "sudo parted /dev/sdb print"],
+    "WHY IT WORKS: parted supports GPT (needed for disks >2TiB or >4 primary partitions) and can be scripted non-interactively, unlike fdisk. Starting at 1MiB (not sector 0) aligns the partition to modern 4K-sector/SSD boundaries. WHY A VARIANT FAILS: using fdisk's MBR scheme on a disk larger than 2TiB silently caps usable capacity at 2TiB — GPT via parted or gdisk is required beyond that.")
+
+add("Partition a disk with gdisk (GPT, interactive)", "INTER", "System Management",
+    "Use the GPT-native equivalent of fdisk.",
+    ["sudo gdisk /dev/sdc", "# o (new GPT), n (new partition), w (write)",
+     "sudo partprobe /dev/sdc"],
+    "WHY IT WORKS: gdisk mirrors fdisk's interactive workflow but natively understands GPT structures (protective MBR, backup header at the end of the disk), which plain fdisk cannot safely edit. WHY IT MATTERS: GPT keeps a backup partition table at the end of the disk, so gdisk can often recover a corrupted primary table automatically.")
+
+add("Create and mount an ext4 filesystem", "CORE", "System Management",
+    "Format a new partition and mount it persistently.",
+    ["sudo mkfs.ext4 /dev/sdb1", "sudo mkdir -p /data",
+     "sudo mount /dev/sdb1 /data", "blkid /dev/sdb1"],
+    "WHY IT WORKS: `mkfs.ext4` writes filesystem metadata (superblock, inode tables, journal) onto the partition; `mount` attaches it into the directory tree at the mountpoint. `blkid` then reports the UUID needed for a durable fstab entry. WHY A VARIANT FAILS: mounting by device name (/dev/sdb1) in fstab instead of UUID breaks if disk enumeration order changes after adding/removing drives.")
+
+add("Add a persistent mount via /etc/fstab (UUID)", "CORE", "System Management",
+    "Make a filesystem mount automatically at boot using its UUID.",
+    ["blkid /dev/sdb1", "sudo vi /etc/fstab",
+     "# UUID=1234-5678-ABCD  /data  ext4  defaults  0  2",
+     "sudo mount -a", "findmnt /data"],
+    "WHY IT WORKS: fstab fields are device, mountpoint, fstype, options, dump-flag, fsck-order; using UUID instead of a device path survives drive renumbering. `mount -a` tests every fstab entry without rebooting. WHY A VARIANT FAILS: a typo or missing device in fstab can drop the system into emergency mode at the next boot — always test with `mount -a` first, and consider the `nofail` option for non-critical mounts.")
+
+add("Create and activate a swap file", "CORE", "System Management",
+    "Add swap space without repartitioning.",
+    ["sudo fallocate -l 2G /swapfile", "sudo chmod 600 /swapfile",
+     "sudo mkswap /swapfile", "sudo swapon /swapfile",
+     "echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab"],
+    "WHY IT WORKS: `fallocate` reserves the space, `mkswap` writes swap signature/metadata, and `swapon` activates it immediately; the fstab line makes it persistent across reboots. Restricting permissions to 600 prevents other users from reading process memory that gets paged out. WHY A VARIANT FAILS: skipping `chmod 600` leaves swap contents (which can include sensitive memory pages) world-readable on some filesystems.")
+
+add("Create an LVM physical volume and volume group", "INTER", "System Management",
+    "Prepare disks for LVM and pool them into a volume group.",
+    ["sudo pvcreate /dev/sdb1 /dev/sdc1", "sudo vgcreate vg_data /dev/sdb1 /dev/sdc1",
+     "sudo vgs", "sudo pvs"],
+    "WHY IT WORKS: `pvcreate` writes LVM metadata onto each partition so it can be pooled; `vgcreate` combines physical volumes into one volume group, merging their space into a single allocatable pool. WHY IT MATTERS: LVM's power is that a volume group can span multiple physical disks, so a logical volume can grow beyond any single disk's size.")
+
+add("Create and grow a logical volume with a filesystem", "INTER", "System Management",
+    "Carve out a logical volume, format it, then extend it online.",
+    ["sudo lvcreate -L 20G -n lv_app vg_data", "sudo mkfs.ext4 /dev/vg_data/lv_app",
+     "sudo mount /dev/vg_data/lv_app /app",
+     "sudo lvextend -L +10G /dev/vg_data/lv_app",
+     "sudo resize2fs /dev/vg_data/lv_app"],
+    "WHY IT WORKS: `lvcreate` allocates space from the VG into a logical volume; after growing it with `lvextend`, the filesystem itself must also be grown with a filesystem-specific tool (`resize2fs` for ext4, `xfs_growfs` for XFS) — extending the block device doesn't automatically resize the filesystem on top of it. WHY A VARIANT FAILS: running `lvextend` without following up with `resize2fs`/`xfs_growfs` leaves the extra space allocated but unusable — `df` still shows the old size.")
+
+add("Create a software RAID1 array with mdadm", "ADV", "System Management",
+    "Mirror two disks for redundancy using Linux software RAID.",
+    ["sudo mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sdd1 /dev/sde1",
+     "cat /proc/mdstat", "sudo mkfs.ext4 /dev/md0",
+     "sudo mdadm --detail --scan | sudo tee -a /etc/mdadm.conf"],
+    "WHY IT WORKS: mdadm assembles member partitions into a software RAID device that the kernel presents as one block device; --level=1 mirrors all writes to both members. Saving the array's UUID/layout to /etc/mdadm.conf lets it reassemble correctly and consistently across reboots. WHY A VARIANT FAILS: skipping the mdadm.conf step can cause devices to reassemble in a different, sometimes degraded order after reboot, especially with more than one array on the host.")
+
+add("Monitor and recover a degraded RAID array", "ADV", "System Management",
+    "Detect a failed RAID member and replace it.",
+    ["cat /proc/mdstat", "sudo mdadm --detail /dev/md0",
+     "sudo mdadm /dev/md0 --remove /dev/sdd1",
+     "sudo mdadm /dev/md0 --add /dev/sdf1"],
+    "WHY IT WORKS: /proc/mdstat and `mdadm --detail` show member state (active/faulty/spare); removing the faulty member and adding a replacement triggers an automatic resync onto the new disk while the array stays online (for RAID1/5/6/10). WHY IT MATTERS: RAID protects against a single disk failure, not against accidental deletion or corruption — it is not a backup strategy.")
+
+add("List PCI and USB hardware", "CORE", "System Management",
+    "Enumerate installed PCI devices and connected USB devices.",
+    ["lspci -k", "lsusb -v | head -30", "sudo dmidecode -t system"],
+    "WHY IT WORKS: `lspci -k` shows PCI devices plus the kernel driver bound to each — useful for confirming a NIC or GPU has the right driver loaded. `dmidecode` reads SMBIOS/DMI tables for hardware inventory (vendor, model, serial) without opening the case. WHY IT MATTERS: lsusb needs root or udev rules to see full descriptor detail on some systems; running as a normal user may truncate output.")
+
+add("Basic KVM/QEMU VM creation concept", "ADV", "System Management",
+    "Verify virtualization support and create a VM disk + guest.",
+    ["egrep -c '(vmx|svm)' /proc/cpuinfo", "lsmod | grep kvm",
+     "sudo qemu-img create -f qcow2 /var/lib/libvirt/images/vm1.qcow2 20G",
+     "sudo virt-install --name vm1 --memory 2048 --vcpus 2 --disk path=/var/lib/libvirt/images/vm1.qcow2 --cdrom /iso/install.iso --network network=default"],
+    "WHY IT WORKS: a non-zero egrep count confirms hardware virtualization extensions (Intel VT-x/vmx or AMD-V/svm) are present and enabled in firmware; `qemu-img` allocates a copy-on-write-capable disk image, and `virt-install` scripts a full libvirt-managed VM definition. WHY A VARIANT FAILS: if /proc/cpuinfo shows 0, KVM acceleration is unavailable (often disabled in BIOS/hypervisor passthrough), and VMs will fall back to slow, full software emulation.")
+
+# =====================================================================
+# DOMAIN 2: Services & User Management (~20) — files, permissions,
+# users/groups, packages, systemd services, cron/at, processes, containers
+# =====================================================================
+
+add("Core file management commands", "CORE", "Services & User Management",
+    "Copy, move, remove and link files safely.",
+    ["cp -a report.txt /backup/", "mv draft.txt final.txt",
+     "rm -i old.log", "ln -s /opt/app/app.conf /etc/app.conf",
+     "find /var/log -name '*.log' -mtime +30"],
+    "WHY IT WORKS: `cp -a` preserves permissions/timestamps/links (archive mode); `ln -s` creates a symbolic link so one file can be referenced from multiple paths; `find -mtime +30` locates files older than 30 days for cleanup. WHY A VARIANT FAILS: using plain `rm *.log` in the wrong directory with no -i and no confirmation is a classic destructive mistake — always dry-run with `find ... -print` before piping to `-delete` or `xargs rm`.")
+
+add("Symbolic vs hard links", "CORE", "Services & User Management",
+    "Demonstrate the difference between symlinks and hard links.",
+    ["ln /data/file.txt /data/hardlink.txt",
+     "ln -s /data/file.txt /data/symlink.txt",
+     "ls -li /data/file.txt /data/hardlink.txt /data/symlink.txt"],
+    "WHY IT WORKS: a hard link is a second directory entry pointing at the same inode (same data, same inode number, survives the original being deleted); a symlink is a separate inode holding a path string, which breaks if the target moves. WHY A VARIANT FAILS: hard links cannot cross filesystem/partition boundaries because inode numbers are only unique within one filesystem — attempting one gives 'Invalid cross-device link'.")
+
+add("Symbolic permission changes with chmod", "CORE", "Services & User Management",
+    "Grant execute to owner and remove group/other write access.",
+    ["chmod u+x deploy.sh", "chmod go-w deploy.sh", "ls -l deploy.sh"],
+    "WHY IT WORKS: symbolic mode (u/g/o/a with +/-/=) adjusts specific permission bits relative to the current mode without needing to know the full octal value. WHY IT MATTERS: symbolic mode is safer for scripts that must not disturb unrelated bits, versus octal mode which always sets the exact absolute value.")
+
+add("Octal permission changes with chmod", "CORE", "Services & User Management",
+    "Set exact permission bits using octal notation.",
+    ["chmod 750 /srv/app/deploy.sh", "chmod 644 /srv/app/config.yaml",
+     "stat -c '%A %a %n' /srv/app/deploy.sh"],
+    "WHY IT WORKS: each octal digit sums read(4)+write(2)+execute(1) for owner/group/other respectively; 750 = rwxr-x---. WHY A VARIANT FAILS: `chmod 777` grants world write+execute on every file it touches — a common but serious security mistake that should almost never be used outside of throwaway lab scratch space.")
+
+add("Change ownership with chown and chgrp", "CORE", "Services & User Management",
+    "Transfer file ownership to another user and group.",
+    ["sudo chown deploy:webapps /srv/app -R", "sudo chgrp webapps /srv/app/logs",
+     "ls -l /srv/app"],
+    "WHY IT WORKS: `chown user:group` sets both owner and group in one call; `-R` recurses into subdirectories. Separating chgrp lets you change just the group without touching the owner. WHY A VARIANT FAILS: recursively chowning a directory that contains other users' files (e.g. a shared /tmp-like path) can break their access unexpectedly — scope -R carefully.")
+
+add("Set and verify umask", "CORE", "Services & User Management",
+    "Control default permissions for newly created files.",
+    ["umask", "umask 027", "touch newfile.txt", "ls -l newfile.txt"],
+    "WHY IT WORKS: umask is subtracted from the system default (666 for files, 777 for dirs) to compute default permissions for new files; 027 yields 640 for new files (rw-r-----). WHY IT MATTERS: umask set interactively in a shell doesn't persist — put it in /etc/profile, a user's shell rc file, or a systemd service's UMask= directive for it to apply consistently.")
+
+add("Set the setuid, setgid and sticky bits", "INTER", "Services & User Management",
+    "Use special permission bits for shared directories and privileged binaries.",
+    ["chmod g+s /srv/shared_project", "chmod +t /srv/shared_project",
+     "ls -ld /srv/shared_project", "ls -l /usr/bin/passwd"],
+    "WHY IT WORKS: setgid on a directory makes new files inherit the directory's group (good for team-shared folders); the sticky bit on a directory (like /tmp) stops users deleting each other's files even with write access; setuid on a binary like /usr/bin/passwd lets it run with the file owner's (root) privileges to edit /etc/shadow. WHY A VARIANT FAILS: setuid on a directory has no meaning on Linux (only setgid and sticky do anything there) — a common exam-trap confusion.")
+
+add("Manage ACLs beyond the traditional permission model", "ADV", "Services & User Management",
+    "Grant a specific user extra access without changing group ownership.",
+    ["sudo setfacl -m u:jdoe:rwx /srv/app/data", "getfacl /srv/app/data",
+     "sudo setfacl -x u:jdoe /srv/app/data"],
+    "WHY IT WORKS: ACLs (Access Control Lists) let you assign fine-grained permissions to specific users/groups beyond the single owner/group/other model; the filesystem must be mounted with acl support (default on most modern ext4/xfs). WHY A VARIANT FAILS: forgetting that a plain `chmod` afterwards can collapse/mask ACL entries via the 'mask' entry — always re-check `getfacl` after any chmod on an ACL'd file.")
+
+add("Use chattr to make a file immutable", "ADV", "Services & User Management",
+    "Protect a critical file from modification or deletion, even by root.",
+    ["sudo chattr +i /etc/resolv.conf", "lsattr /etc/resolv.conf",
+     "sudo chattr -i /etc/resolv.conf"],
+    "WHY IT WORKS: the immutable attribute is enforced at the filesystem level, blocking writes, renames, and deletes for ALL users including root until the attribute is removed. WHY IT MATTERS: this is why editing a chattr +i file silently fails with 'Operation not permitted' even when run as root and even though normal permission bits look fine — always check `lsattr` when a permission error doesn't make sense.")
+
+add("Create users and groups", "CORE", "Services & User Management",
+    "Add a new user with a home directory and a supplementary group.",
+    ["sudo groupadd webapps", "sudo useradd -m -s /bin/bash -G webapps jdoe",
+     "sudo passwd jdoe", "id jdoe"],
+    "WHY IT WORKS: `useradd -m` creates the home directory from /etc/skel, -s sets the login shell, and -G adds supplementary (secondary) group membership; `passwd` sets the initial password since useradd alone leaves the account locked. WHY A VARIANT FAILS: forgetting -m leaves the user without a home directory, so their shell profile and default files never get created, and login may drop them at /.")
+
+add("Modify and delete user accounts", "CORE", "Services & User Management",
+    "Change a user's shell/group and later remove the account.",
+    ["sudo usermod -aG docker jdoe", "sudo usermod -s /usr/sbin/nologin svc_app",
+     "sudo userdel -r jdoe"],
+    "WHY IT WORKS: `usermod -aG` APPENDS a group without removing existing ones; `-G` alone would overwrite the whole supplementary group list. `userdel -r` removes the account plus its home directory and mail spool. WHY A VARIANT FAILS: using `usermod -G docker jdoe` instead of `-aG` silently wipes out every other supplementary group the user had — always use -aG when adding.")
+
+add("Inspect /etc/passwd, /etc/shadow and password aging", "INTER", "Services & User Management",
+    "Read account and password-aging metadata.",
+    ["getent passwd jdoe", "sudo getent shadow jdoe",
+     "chage -l jdoe", "sudo chage -M 90 -W 14 jdoe"],
+    "WHY IT WORKS: /etc/passwd holds account metadata (UID/GID/home/shell) and is world-readable; /etc/shadow holds the actual hashed password and aging fields and is root-only. `chage -M 90 -W 14` enforces a 90-day max password age with a 14-day warning. WHY A VARIANT FAILS: directly editing /etc/shadow by hand risks corrupting the colon-delimited field layout — always use `chage`, `passwd`, or `vipw -s` which lock the file properly.")
+
+add("Query and manage package repos with dnf/yum", "CORE", "Services & User Management",
+    "Install, update and remove packages on RHEL-family systems.",
+    ["sudo dnf install -y httpd", "sudo dnf update -y",
+     "dnf list installed | grep httpd", "sudo dnf remove httpd"],
+    "WHY IT WORKS: dnf resolves dependencies against configured repos and is the modern successor to yum on RHEL/Fedora/Alma/Rocky (yum is now an alias to dnf on most current releases). WHY IT MATTERS: `dnf update` upgrades all packages while `dnf update httpd` limits it to one — running blind full updates on a production box without testing is a common outage cause.")
+
+add("Query and manage packages with apt/dpkg", "CORE", "Services & User Management",
+    "Install, inspect and remove packages on Debian/Ubuntu.",
+    ["sudo apt update", "sudo apt install -y nginx",
+     "dpkg -L nginx | head", "sudo apt remove nginx"],
+    "WHY IT WORKS: `apt` is the high-level, dependency-resolving front end; `dpkg` operates on individual .deb packages directly and can list installed files (-L) or query package details (-s) without touching the network. WHY A VARIANT FAILS: `dpkg -i package.deb` alone does NOT resolve missing dependencies — you'd need `apt install ./package.deb` or a follow-up `apt -f install` to fix broken deps.")
+
+add("Inspect an RPM package without installing it", "INTER", "Services & User Management",
+    "Query package metadata and file lists directly.",
+    ["rpm -qip package.rpm", "rpm -qlp package.rpm",
+     "rpm -qa | grep kernel", "rpm -V httpd"],
+    "WHY IT WORKS: `rpm -q` queries the RPM database or a package file directly (info with -i, file list with -l) without needing dnf/yum or network access; `-V` verifies installed files against the package's recorded checksums/permissions, useful for detecting tampering. WHY IT MATTERS: rpm is the low-level tool dnf is built on — useful when dnf itself is broken or offline.")
+
+add("Install and manage snap/flatpak sandboxed apps", "INTER", "Services & User Management",
+    "Use universal packaging formats alongside the distro package manager.",
+    ["sudo snap install code --classic", "snap list",
+     "flatpak install flathub org.videolan.VLC", "flatpak list"],
+    "WHY IT WORKS: snap and flatpak bundle an application with its own runtime/dependencies in a sandbox, so it installs/runs consistently across distros independent of the system package manager. WHY IT MATTERS: `--classic` on snap disables sandbox confinement for apps needing full system access (like editors with shell integration) — understand what you're opting out of before using it.")
+
+add("Manage a systemd service (start/enable/status)", "CORE", "Services & User Management",
+    "Control a service's running state and boot-time behavior.",
+    ["sudo systemctl start nginx", "sudo systemctl enable nginx",
+     "systemctl status nginx", "systemctl is-enabled nginx"],
+    "WHY IT WORKS: `start`/`stop` affect the CURRENT running state only; `enable`/`disable` affect whether systemd creates the symlink to auto-start it at the NEXT boot — the two are independent. WHY A VARIANT FAILS: running only `enable` without `start` means the service won't run until the next reboot; assuming `enable` also starts it immediately is a common mix-up (use `enable --now` to do both).")
+
+add("Reload a modified systemd unit file", "INTER", "Services & User Management",
+    "Apply changes to a custom unit and restart the service.",
+    ["sudo vi /etc/systemd/system/myapp.service",
+     "sudo systemctl daemon-reload", "sudo systemctl restart myapp"],
+    "WHY IT WORKS: systemd caches parsed unit files in memory; `daemon-reload` re-reads all unit files from disk so subsequent commands see the changes. WHY A VARIANT FAILS: editing a unit file and just running `restart` without `daemon-reload` first restarts the service using the OLD cached unit definition — a very common troubleshooting trap.")
+
+add("Read service logs with journalctl", "CORE", "Services & User Management",
+    "Filter systemd journal output for one service and follow it live.",
+    ["journalctl -u nginx --since today", "journalctl -u nginx -f",
+     "journalctl -u nginx -p err --no-pager"],
+    "WHY IT WORKS: `-u` filters to one systemd unit's log stream, `-f` follows new entries like `tail -f`, and `-p err` filters by minimum priority level (only error and worse). WHY IT MATTERS: journalctl output is binary-indexed and structured, so filtering by unit/priority/time is far more precise than grepping flat text log files.")
+
+add("Schedule recurring jobs with cron", "CORE", "Services & User Management",
+    "Add a per-user crontab entry to run a backup script nightly.",
+    ["crontab -e", "# 30 2 * * *  /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1",
+     "crontab -l"],
+    "WHY IT WORKS: the five cron fields are minute, hour, day-of-month, month, day-of-week; `30 2 * * *` fires at 02:30 every day. Redirecting both stdout and stderr (2>&1) into a log file captures failures that would otherwise be silently discarded. WHY A VARIANT FAILS: cron jobs run with a minimal environment (no full PATH, no interactive shell profile) — scripts that work fine when run manually can fail under cron unless they use absolute paths or source the needed environment explicitly.")
+
+add("Schedule a one-time job with at", "INTER", "Services & User Management",
+    "Run a single deferred command at a specific future time.",
+    ["echo \"/usr/local/bin/report.sh\" | at 23:00",
+     "atq", "atrm 3"],
+    "WHY IT WORKS: `at` queues a one-off job for a specific time (unlike cron's recurring schedule); `atq` lists pending jobs and `atrm` cancels one by job number. WHY IT MATTERS: the atd daemon must be running for queued jobs to fire — on minimal installs it may need to be installed and enabled separately from cron.")
+
+add("Monitor and control processes", "CORE", "Services & User Management",
+    "Inspect running processes and manage their priority/state.",
+    ["ps aux --sort=-%cpu | head", "top -o %MEM",
+     "renice -n 10 -p 4821", "kill -15 4821"],
+    "WHY IT WORKS: `ps aux` snapshots all processes; sorting by -%cpu surfaces top consumers. `renice` adjusts scheduling priority (nice value) of a running process without restarting it. `kill -15` (SIGTERM) politely asks a process to exit, allowing cleanup. WHY A VARIANT FAILS: reaching straight for `kill -9` (SIGKILL) skips a process's own cleanup/shutdown logic — try SIGTERM first and only escalate to -9 if the process ignores it.")
+
+add("Manage background jobs in a shell session", "INTER", "Services & User Management",
+    "Suspend, resume and background a long-running command.",
+    ["sleep 300", "# press Ctrl-Z to suspend",
+     "jobs", "bg %1", "fg %1", "disown %1"],
+    "WHY IT WORKS: Ctrl-Z sends SIGTSTP, suspending the foreground job; `bg` resumes it in the background, `fg` brings it back to the foreground, and `disown` detaches it from the shell so it survives even if the shell exits. WHY A VARIANT FAILS: closing the terminal on a backgrounded-but-not-disowned job usually sends it SIGHUP and kills it too — use `disown` or `nohup`/`setsid` for jobs that must outlive the session.")
+
+add("Run and manage containers with podman", "ADV", "Services & User Management",
+    "Pull an image, run a rootless container, and inspect it.",
+    ["podman pull docker.io/library/nginx:latest",
+     "podman run -d --name web -p 8080:80 nginx:latest",
+     "podman ps", "podman logs web"],
+    "WHY IT WORKS: podman is daemonless and rootless-capable, mapping container UIDs to unprivileged host UIDs via user namespaces, unlike Docker's traditional root-owned daemon model. `-p 8080:80` publishes container port 80 on host port 8080. WHY IT MATTERS: rootless podman containers below port 1024 on the host require extra capability grants since unprivileged users normally can't bind low ports — that's why 8080, not 80, is mapped here.")
+
+add("Build a container image from a Dockerfile", "ADV", "Services & User Management",
+    "Write a minimal Dockerfile and build/run it.",
+    ["cat > Dockerfile <<'EOF'\nFROM alpine:3.19\nRUN apk add --no-cache curl\nCOPY entrypoint.sh /entrypoint.sh\nRUN chmod +x /entrypoint.sh\nENTRYPOINT [\"/entrypoint.sh\"]\nEOF",
+     "podman build -t myapp:1.0 .", "podman run --rm myapp:1.0"],
+    "WHY IT WORKS: each Dockerfile instruction creates a new cached layer; ordering RUN/COPY so rarely-changing steps (installing packages) come before frequently-changing ones (application code) maximizes build-cache reuse on rebuilds. WHY A VARIANT FAILS: forgetting `chmod +x` on the entrypoint script inside the image (host permissions don't always survive COPY faithfully across build contexts) causes 'permission denied' at container start even though the file looks fine on the host.")
+
+# =====================================================================
+# DOMAIN 3: Security (~18) — SSH hardening, sudo, firewalls, SELinux,
+# AppArmor, password policy, gpg, fail2ban, auditd
+# =====================================================================
+
+add("Generate an SSH key pair and copy it to a server", "CORE", "Security",
+    "Set up passwordless key-based SSH authentication.",
+    ["ssh-keygen -t ed25519 -C \"jdoe@workstation\"",
+     "ssh-copy-id jdoe@server01",
+     "ssh jdoe@server01"],
+    "WHY IT WORKS: `ssh-keygen` creates a private/public key pair (ed25519 is modern, fast, and small); `ssh-copy-id` appends the public key to the remote ~/.ssh/authorized_keys over an initial password login, after which key-based auth works without a password. WHY A VARIANT FAILS: if ~/.ssh or authorized_keys on the server has group/world write permissions, sshd refuses to use the key at all as a security precaution — permissions must be 700 for ~/.ssh and 600 for authorized_keys.")
+
+add("Harden sshd_config", "INTER", "Security",
+    "Disable root login and password auth, restrict to key-based access.",
+    ["sudo vi /etc/ssh/sshd_config",
+     "# PermitRootLogin no",
+     "# PasswordAuthentication no",
+     "# AllowUsers jdoe admin",
+     "sudo sshd -t", "sudo systemctl restart sshd"],
+    "WHY IT WORKS: disabling root login and password auth forces attackers to need a valid private key rather than brute-forcing a password, and `AllowUsers` whitelists exactly who may connect. `sshd -t` syntax-checks the config before reloading. WHY A VARIANT FAILS: restarting sshd with a config typo can lock out ALL remote access instantly — always run `sshd -t` first, and keep an existing session open while testing a new one in parallel.")
+
+add("Restrict sudo privileges with visudo", "CORE", "Security",
+    "Grant a user limited passwordless sudo for specific commands only.",
+    ["sudo visudo",
+     "# jdoe ALL=(root) NOPASSWD: /usr/bin/systemctl restart nginx",
+     "sudo -l -U jdoe"],
+    "WHY IT WORKS: `visudo` locks the sudoers file and validates syntax before saving, preventing a broken file from locking out all sudo access; scoping to one exact command path (not a wildcard) limits the blast radius of that grant. WHY A VARIANT FAILS: editing /etc/sudoers directly with a plain text editor risks a syntax error that breaks sudo for EVERYONE, with no visudo-style pre-save validation to catch it.")
+
+add("Create a drop-in sudoers rule for a group", "INTER", "Security",
+    "Grant an entire admin group sudo access via /etc/sudoers.d/.",
+    ["echo '%sysadmins ALL=(ALL) ALL' | sudo tee /etc/sudoers.d/sysadmins",
+     "sudo chmod 440 /etc/sudoers.d/sysadmins",
+     "sudo visudo -c"],
+    "WHY IT WORKS: files in /etc/sudoers.d/ are included automatically and let you manage grants modularly instead of editing one monolithic file; permissions must be exactly 440 (owner/group read-only) or sudo will ignore the file for safety. WHY A VARIANT FAILS: leaving the new file world-writable or executable causes sudo to reject it outright with a 'ignoring insecure file mode' warning.")
+
+add("Configure firewalld zones and services", "CORE", "Security",
+    "Open a service port using the RHEL-family dynamic firewall manager.",
+    ["sudo firewall-cmd --get-active-zones", "sudo firewall-cmd --zone=public --add-service=https --permanent",
+     "sudo firewall-cmd --reload", "sudo firewall-cmd --list-all"],
+    "WHY IT WORKS: firewalld manages zones (trust levels) with named services mapped to ports; `--permanent` writes the rule to persistent config, but it only takes effect after `--reload` merges it into the running ruleset. WHY A VARIANT FAILS: adding a rule with `--permanent` and forgetting `--reload` (or adding one without `--permanent` expecting it to survive a reboot) is the most common firewalld mistake — remember they're two separate rule sets, runtime and permanent.")
+
+add("Configure ufw on Debian/Ubuntu", "CORE", "Security",
+    "Enable the uncomplicated firewall and allow SSH plus HTTP.",
+    ["sudo ufw default deny incoming", "sudo ufw allow OpenSSH",
+     "sudo ufw allow 80/tcp", "sudo ufw enable", "sudo ufw status verbose"],
+    "WHY IT WORKS: ufw is a friendly front end over iptables/nftables; setting a default-deny policy first and explicitly allowing SSH BEFORE enabling ufw prevents you from locking yourself out over a remote session. WHY A VARIANT FAILS: running `ufw enable` before allowing your own SSH port immediately cuts your remote session with no way back in except console/out-of-band access.")
+
+add("Write nftables rules directly", "ADV", "Security",
+    "Build a modern nftables ruleset with a base chain.",
+    ["sudo nft add table inet filter",
+     "sudo nft add chain inet filter input { type filter hook input priority 0 \\; policy drop \\; }",
+     "sudo nft add rule inet filter input ct state established,related accept",
+     "sudo nft add rule inet filter input tcp dport 22 accept",
+     "sudo nft list ruleset"],
+    "WHY IT WORKS: nftables is the modern successor to iptables, using tables/chains/rules with a unified syntax for IPv4+IPv6; the stateful `ct state established,related accept` rule lets return traffic for connections you initiated back in, which is required once the default policy is drop. WHY A VARIANT FAILS: setting `policy drop` on the input chain before adding the established/related and SSH-allow rules cuts off your own remote session the instant the ruleset is applied.")
+
+add("Manage legacy iptables rules", "ADV", "Security",
+    "Add and persist a basic iptables allow/deny ruleset.",
+    ["sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT",
+     "sudo iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+     "sudo iptables -P INPUT DROP",
+     "sudo iptables-save | sudo tee /etc/sysconfig/iptables"],
+    "WHY IT WORKS: iptables rules are evaluated top-down per chain, and `-A` appends to the end; `iptables-save` dumps the in-memory ruleset to a file that can be restored at boot with `iptables-restore` or a distro's persistence service. WHY A VARIANT FAILS: iptables rules are NOT persistent by default — a reboot without saving/reloading them silently reverts to an open (or distro-default) ruleset, undoing your hardening.")
+
+add("Check and set SELinux enforcement mode", "INTER", "Security",
+    "Verify SELinux status and switch between modes.",
+    ["getenforce", "sudo setenforce 0", "sestatus",
+     "sudo vi /etc/selinux/config", "# SELINUX=enforcing"],
+    "WHY IT WORKS: `setenforce 0/1` toggles enforcing vs permissive at runtime (permissive logs denials but doesn't block them, useful for debugging); the persistent boot-time mode is set separately in /etc/selinux/config. WHY A VARIANT FAILS: setting SELinux to `disabled` (not just permissive) in the config requires relabeling the entire filesystem on next boot if you ever re-enable it, and disables SELinux's audit logging entirely in the meantime — permissive is almost always the better troubleshooting choice.")
+
+add("Fix an SELinux context / file labeling issue", "ADV", "Security",
+    "Diagnose and correct a mislabeled web content directory.",
+    ["ls -Z /var/www/html/index.html",
+     "sudo semanage fcontext -a -t httpd_sys_content_t '/srv/www(/.*)?'",
+     "sudo restorecon -Rv /srv/www"],
+    "WHY IT WORKS: SELinux enforces policy based on file context labels (type), not just Unix permissions; `semanage fcontext` registers the correct label pattern for a non-standard content path, and `restorecon` actually applies it to existing files. WHY A VARIANT FAILS: moving web content to a custom directory outside /var/www without relabeling leaves files with the wrong context (often default_t), so Apache gets 'permission denied' even though normal chmod/chown looks completely correct — this is the single most common SELinux troubleshooting scenario.")
+
+add("Toggle an SELinux boolean", "ADV", "Security",
+    "Allow httpd to make outbound network connections via a policy boolean.",
+    ["getsebool httpd_can_network_connect",
+     "sudo setsebool -P httpd_can_network_connect on",
+     "getsebool -a | grep httpd"],
+    "WHY IT WORKS: booleans are pre-built policy toggles for common scenarios (like a web app needing outbound DB connections) without writing custom policy; `-P` makes the change persistent across reboots by rewriting the policy store, not just the in-memory state. WHY A VARIANT FAILS: forgetting `-P` means the boolean reverts to its previous state on reboot, and the same 'denied' behavior mysteriously reappears later.")
+
+add("Enable AppArmor and check profile status", "ADV", "Security",
+    "Verify AppArmor profiles are loaded and enforcing.",
+    ["sudo aa-status", "sudo aa-enforce /etc/apparmor.d/usr.sbin.nginx",
+     "sudo aa-complain /etc/apparmor.d/usr.sbin.tcpdump"],
+    "WHY IT WORKS: AppArmor (Debian/Ubuntu's mandatory access control, an alternative to SELinux) confines programs by path-based profiles rather than SELinux's label-based model; `aa-enforce` blocks violations, while `aa-complain` only logs them — useful while tuning a new profile. WHY IT MATTERS: unlike SELinux, AppArmor profiles are simpler path-based rules, which is easier to read but less granular for complex multi-context applications.")
+
+add("Enforce password complexity and aging policy", "INTER", "Security",
+    "Set minimum password age, expiry warning and PAM complexity rules.",
+    ["sudo chage -m 1 -M 90 -W 7 jdoe",
+     "sudo vi /etc/security/pwquality.conf",
+     "# minlen = 12", "# minclass = 3"],
+    "WHY IT WORKS: `chage -m/-M/-W` set minimum age, maximum age and warning days at the account level; pam_pwquality (invoked from /etc/pam.d/system-auth via PAM) enforces complexity rules like minimum length and character-class diversity at password-change time. WHY IT MATTERS: PAM's pluggable stack means password policy is enforced by a module (pam_pwquality), not the passwd binary itself — misconfiguring the PAM stack, not just pwquality.conf, is how these rules end up bypassed.")
+
+add("Encrypt and decrypt a file with GPG", "ADV", "Security",
+    "Protect a sensitive file at rest using symmetric GPG encryption.",
+    ["gpg -c secrets.txt", "ls secrets.txt.gpg",
+     "gpg -d secrets.txt.gpg > secrets.txt"],
+    "WHY IT WORKS: `gpg -c` performs symmetric encryption using a passphrase you supply interactively, producing a .gpg file that requires the same passphrase to decrypt with `-d`. WHY IT MATTERS: for sharing encrypted files with OTHERS (not just protecting your own data at rest), asymmetric key-pair encryption (`gpg --encrypt --recipient`) is the right tool instead — symmetric mode requires sharing the passphrase out-of-band.")
+
+add("Generate a GPG key pair and sign a file", "ADV", "Security",
+    "Create a personal key pair for signing and verifying authenticity.",
+    ["gpg --full-generate-key", "gpg --list-keys",
+     "gpg --detach-sign release.tar.gz",
+     "gpg --verify release.tar.gz.sig release.tar.gz"],
+    "WHY IT WORKS: a detached signature (--detach-sign) produces a separate .sig file so recipients can verify the original file's integrity and authorship without modifying it; `--verify` checks the signature against the signer's public key. WHY IT MATTERS: verification only proves the file matches what was signed by that specific key — it says nothing about trust unless you've independently verified the key belongs to who it claims.")
+
+add("Install and configure fail2ban", "ADV", "Security",
+    "Automatically ban IPs that repeatedly fail SSH login.",
+    ["sudo dnf install -y fail2ban",
+     "sudo cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local",
+     "sudo vi /etc/fail2ban/jail.local",
+     "# [sshd]\\n enabled = true\\n maxretry = 5\\n bantime = 3600",
+     "sudo systemctl enable --now fail2ban", "sudo fail2ban-client status sshd"],
+    "WHY IT WORKS: fail2ban watches log files (via journalctl or /var/log/secure) for repeated auth-failure patterns and dynamically inserts a firewall (iptables/nftables/firewalld) ban rule for the offending IP for `bantime` seconds. WHY IT MATTERS: always edit jail.local, never jail.conf directly — package updates overwrite jail.conf, and jail.local's settings take precedence and survive upgrades.")
+
+add("Configure auditd rules for file integrity monitoring", "ADV", "Security",
+    "Watch a sensitive file for any write or attribute changes.",
+    ["sudo auditctl -w /etc/passwd -p wa -k passwd_changes",
+     "sudo ausearch -k passwd_changes",
+     "echo '-w /etc/passwd -p wa -k passwd_changes' | sudo tee -a /etc/audit/rules.d/audit.rules",
+     "sudo systemctl restart auditd"],
+    "WHY IT WORKS: `auditctl -w` watches a path for write(w)/attribute(a) events and tags matching log entries with a searchable key; `ausearch -k` filters the audit log by that key. Rules added directly with auditctl are runtime-only — they must also be added to /etc/audit/rules.d/ to survive a reboot. WHY A VARIANT FAILS: testing a rule with only `auditctl -w` and declaring success, without adding it to the persistent rules file, means the monitoring silently disappears after the next reboot.")
+
+# =====================================================================
+# DOMAIN 4: Automation, Orchestration & Scripting (~17) — bash, python,
+# git, ansible, cron automation, IaC concept, AI-assisted scripting note
+# =====================================================================
+
+add("Write a basic bash script with a shebang", "CORE", "Automation & Scripting",
+    "Create an executable script that checks disk usage.",
+    ["cat > checkdisk.sh <<'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\ndf -h / | tail -1\nEOF",
+     "chmod +x checkdisk.sh", "./checkdisk.sh"],
+    "WHY IT WORKS: the shebang (#!/usr/bin/env bash) tells the kernel which interpreter to run the file with when executed directly; `set -euo pipefail` makes the script exit on any error, on unset variables, and on failures inside a pipeline. WHY A VARIANT FAILS: forgetting `chmod +x` means the kernel refuses to exec the file directly ('Permission denied') even though the content and shebang are perfectly correct — you'd have to run it as `bash checkdisk.sh` instead.")
+
+add("Use variables and command substitution", "CORE", "Automation & Scripting",
+    "Capture command output into a variable and use it in a message.",
+    ["#!/usr/bin/env bash", "HOSTNAME_VAL=$(hostname)",
+     "TODAY=$(date +%F)", "echo \"Report for $HOSTNAME_VAL on $TODAY\""],
+    "WHY IT WORKS: $(...) command substitution runs a command and substitutes its stdout into the surrounding string/assignment; double-quoting \"$VAR\" preserves the value as one word even if it contains spaces. WHY A VARIANT FAILS: using unquoted $VAR in a command (e.g. `cp $FILE /dest`) lets word-splitting and globbing corrupt the command if the value contains spaces or wildcards — always quote variable expansions unless you specifically need splitting.")
+
+add("Conditional logic with if/test", "CORE", "Automation & Scripting",
+    "Branch based on a file existence and numeric comparison check.",
+    ["#!/usr/bin/env bash", "if [[ -f /etc/myapp.conf ]]; then",
+     "  echo \"config found\"", "elif [[ $1 -eq 0 ]]; then",
+     "  echo \"no config, arg was zero\"", "else",
+     "  echo \"missing config\"; exit 1", "fi"],
+    "WHY IT WORKS: `[[ ]]` is bash's extended test construct supporting -f (file exists), -eq (numeric equality) and pattern matching without needing external quoting tricks that the older `[ ]`/test command requires. WHY A VARIANT FAILS: using `=` or `==` for a NUMERIC comparison inside `[[ ]]` performs string comparison, not arithmetic — `[[ 10 == 9 ]]` and `[[ 10 -eq 9 ]]` can disagree in edge cases; always use -eq/-lt/-gt for numbers.")
+
+add("For and while loops over files and input", "CORE", "Automation & Scripting",
+    "Iterate over log files and process lines from a file.",
+    ["#!/usr/bin/env bash",
+     "for f in /var/log/*.log; do echo \"Checking $f\"; done",
+     "while IFS= read -r line; do echo \"Line: $line\"; done < hosts.txt"],
+    "WHY IT WORKS: the for-loop glob-expands *.log into individual filenames; `while IFS= read -r line` reads a file line-by-line safely, with -r preventing backslash escapes from being interpreted and IFS= preserving leading/trailing whitespace. WHY A VARIANT FAILS: `for line in $(cat file)` instead of `while read` splits on whitespace, not lines, silently breaking on any line containing spaces — read-based loops are the correct pattern for line-oriented processing.")
+
+add("Case statement for argument dispatch", "INTER", "Automation & Scripting",
+    "Dispatch script behavior based on a positional argument.",
+    ["#!/usr/bin/env bash", "case \"$1\" in",
+     "  start) systemctl start myapp ;;",
+     "  stop)  systemctl stop myapp ;;",
+     "  status) systemctl status myapp ;;",
+     "  *) echo \"Usage: $0 {start|stop|status}\"; exit 1 ;;",
+     "esac"],
+    "WHY IT WORKS: `case` pattern-matches a value against multiple patterns without a long if/elif chain, and the `*)` catch-all pattern ensures unrecognized input is handled gracefully with a usage message. WHY IT MATTERS: $0 always holds the script's own invocation name, which is why usage messages reference $0 instead of hardcoding the script's filename.")
+
+add("Functions, positional parameters and exit codes", "INTER", "Automation & Scripting",
+    "Define a reusable function and propagate a meaningful exit status.",
+    ["#!/usr/bin/env bash", "check_service() {",
+     "  local svc=\"$1\"", "  systemctl is-active --quiet \"$svc\"",
+     "  return $?", "}", "check_service nginx || { echo \"nginx is down\"; exit 2; }"],
+    "WHY IT WORKS: `local` scopes a variable to the function so it doesn't leak into the global shell; `$?` captures the exit status of the last command, and returning it from the function lets the caller test success with `||`/`&&` or `if`. WHY A VARIANT FAILS: omitting `local` on function variables lets them silently overwrite same-named variables elsewhere in the script, causing hard-to-trace bugs when the script grows.")
+
+add("Arithmetic and here-documents in bash", "INTER", "Automation & Scripting",
+    "Perform integer math and emit a multi-line report via here-doc.",
+    ["#!/usr/bin/env bash", "COUNT=$(( 5 + 3 * 2 ))",
+     "cat <<REPORT", "Summary", "-------", "Total items: $COUNT",
+     "REPORT"],
+    "WHY IT WORKS: $(( )) performs integer arithmetic expansion; a here-doc (<<REPORT ... REPORT) feeds a multi-line literal block to a command's stdin, with variable expansion still active unless the delimiter is quoted (<<'REPORT'). WHY A VARIANT FAILS: quoting the here-doc delimiter (<<'REPORT') disables variable expansion inside the block entirely — use that form only when you want the text to be truly literal.")
+
+add("Write a small Python admin script", "INTER", "Automation & Scripting",
+    "Use Python to check disk usage and alert if a threshold is exceeded.",
+    ["#!/usr/bin/env python3\nimport shutil, sys\n\nusage = shutil.disk_usage(\"/\")\npercent_used = usage.used / usage.total * 100\nif percent_used > 90:\n    print(f\"WARNING: root filesystem at {percent_used:.1f}%\")\n    sys.exit(1)\nprint(f\"OK: root filesystem at {percent_used:.1f}%\")\nsys.exit(0)"],
+    "WHY IT WORKS: Python's shutil.disk_usage gives a portable, structured way to check space without parsing `df` text output; a non-zero sys.exit(1) lets shell callers and monitoring systems detect the WARNING state programmatically. WHY IT MATTERS: preferring structured library calls over parsing CLI tool text output (like `df`) makes scripts far less fragile to formatting changes between distros/versions.")
+
+add("Initialize a git repo and make the first commit", "CORE", "Automation & Scripting",
+    "Start version control for a new project directory.",
+    ["git init", "git add .", "git commit -m \"Initial commit\"",
+     "git log --oneline"],
+    "WHY IT WORKS: `git init` creates the .git metadata directory; `add` stages changes into the index, and `commit` snapshots the staged index permanently into history with a message. WHY IT MATTERS: nothing is committed until it's staged with `add` first — a common beginner mistake is editing files and running `git commit` expecting it to pick up unstaged changes automatically (it won't, without -a).")
+
+add("Branch, merge and resolve a conflict", "INTER", "Automation & Scripting",
+    "Create a feature branch, merge it back, and handle a conflict.",
+    ["git checkout -b feature/logging", "git add .", "git commit -m \"add logging\"",
+     "git checkout main", "git merge feature/logging",
+     "# on conflict: edit conflict markers, then:",
+     "git add <file>", "git commit"],
+    "WHY IT WORKS: `checkout -b` creates and switches to a new branch in one step; `merge` integrates another branch's commits, and if the same lines were changed on both sides, git inserts <<<<<<< / ======= / >>>>>>> conflict markers for manual resolution before you re-add and commit. WHY A VARIANT FAILS: committing without removing the conflict markers themselves leaves literal '<<<<<<< HEAD' text baked into the file — always search for and clear markers before the resolution commit.")
+
+add("Stash uncommitted changes and pull updates", "INTER", "Automation & Scripting",
+    "Temporarily shelve local edits to sync with the remote.",
+    ["git stash", "git pull origin main", "git stash pop"],
+    "WHY IT WORKS: `git stash` saves uncommitted changes (staged and unstaged) onto a stack and reverts the working tree to match HEAD, letting `pull` proceed cleanly; `stash pop` reapplies the saved changes afterward. WHY A VARIANT FAILS: running `git pull` with uncommitted changes that conflict with incoming commits can be refused or, worse, produce a messy merge — stashing first avoids that entirely.")
+
+add("Run an Ansible ad-hoc command against inventory", "ADV", "Automation & Scripting",
+    "Ping hosts and check uptime across a fleet without writing a playbook.",
+    ["cat > inventory.ini <<'EOF'\n[web]\nweb01.example.com\nweb02.example.com\nEOF",
+     "ansible web -i inventory.ini -m ping",
+     "ansible web -i inventory.ini -a \"uptime\" -u admin --become"],
+    "WHY IT WORKS: ad-hoc mode runs a single module (`-m ping` checks connectivity+Python interpreter, `-a` runs a raw command via the `command` module) against an inventory group without needing a full playbook — good for quick fleet-wide checks. `--become` escalates to root for privileged tasks. WHY IT MATTERS: the Ansible `ping` module does NOT send ICMP — it verifies SSH connectivity and that Python is usable on the remote host, which is a common exam-trap misunderstanding.")
+
+add("Write a small Ansible playbook", "ADV", "Automation & Scripting",
+    "Declare desired state to install and enable a web server across hosts.",
+    ["cat > webserver.yml <<'EOF'\n---\n- name: Configure web servers\n  hosts: web\n  become: true\n  tasks:\n    - name: Install nginx\n      package:\n        name: nginx\n        state: present\n    - name: Enable and start nginx\n      service:\n        name: nginx\n        state: started\n        enabled: true\nEOF",
+     "ansible-playbook -i inventory.ini webserver.yml"],
+    "WHY IT WORKS: playbooks declare the DESIRED end state (package present, service started+enabled) rather than imperative steps; Ansible's modules are idempotent, so re-running the playbook on an already-configured host makes no changes and reports 'ok' instead of 'changed'. WHY IT MATTERS: idempotency is what makes IaC (Infrastructure as Code) safe to run repeatedly — a script using raw shell commands (e.g. `apt install` unconditionally) usually isn't idempotent in the same safe, reportable way.")
+
+add("Chain a script into cron for unattended automation", "INTER", "Automation & Scripting",
+    "Combine a bash script with cron for a nightly automated cleanup job.",
+    ["cat > /usr/local/bin/cleanup_tmp.sh <<'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\nfind /tmp -type f -mtime +7 -delete\nlogger \"cleanup_tmp.sh: purged files older than 7 days\"\nEOF",
+     "chmod +x /usr/local/bin/cleanup_tmp.sh",
+     "( crontab -l 2>/dev/null; echo \"0 3 * * * /usr/local/bin/cleanup_tmp.sh\" ) | crontab -"],
+    "WHY IT WORKS: `logger` writes the script's action into the system journal/syslog so unattended runs still leave an audit trail; the `(crontab -l; echo ...) | crontab -` idiom appends a new line without clobbering existing crontab entries. WHY A VARIANT FAILS: running `echo \"...\" | crontab -` directly (without first listing the existing crontab) REPLACES the entire crontab with just that one line, silently deleting every other scheduled job.")
+
+add("Use AI-assisted scripting responsibly", "INTER", "Automation & Scripting",
+    "Review and test AI-generated shell code before running it in production.",
+    ["# 1. Generate a candidate script with an AI assistant",
+     "# 2. Read every line — do not blind-paste-and-run",
+     "shellcheck candidate.sh",
+     "bash -n candidate.sh   # syntax-only dry run",
+     "# 3. Test in a sandbox/VM before touching production"],
+    "WHY IT WORKS: `shellcheck` statically analyzes a script for common bugs (unquoted variables, unsafe globbing, wrong test operators) that AI-generated code frequently contains; `bash -n` parses the script for syntax errors without executing anything. WHY IT MATTERS: AI-assisted scripts can look plausible while containing destructive or subtly wrong commands (like an unintended `rm -rf $VAR` when $VAR is empty) — human review plus static analysis and sandbox testing are required before running anything AI-generated with elevated privileges.")
+
+# =====================================================================
+# DOMAIN 5: Troubleshooting (~22) — storage, performance, memory/OOM,
+# networking, logs, process/zombie, permissions, boot/emergency target
+# =====================================================================
+
+add("Diagnose disk space exhaustion", "CORE", "Troubleshooting",
+    "Find which filesystem and directory are consuming disk space.",
+    ["df -h", "du -sh /var/* 2>/dev/null | sort -rh | head -10",
+     "find / -xdev -size +500M -exec ls -lh {} \\;"],
+    "WHY IT WORKS: `df -h` shows filesystem-level usage to identify WHICH mount is full; `du -sh` then drills into directories to find WHAT is using the space; `-xdev` on find keeps the search within one filesystem, avoiding descending into other mounted filesystems. WHY A VARIANT FAILS: running `du` on the entire / tree without -xdev on a system with many mounts (NFS, /proc, container overlays) can hang or report misleading totals by traversing network or virtual filesystems.")
+
+add("Recover space from a deleted-but-open file", "INTER", "Troubleshooting",
+    "Diagnose 'disk full' when df and du disagree.",
+    ["df -h /var", "du -sh /var", "sudo lsof +L1 | head",
+     "sudo systemctl restart the-offending-service"],
+    "WHY IT WORKS: on Linux, deleting a file only removes its directory entry — if a process still holds it open, the space isn't actually freed; `lsof +L1` lists open files with a link count of 0, i.e. deleted-but-still-held files, revealing the real space consumer. WHY IT MATTERS: `df` reports disk block usage (including deleted-but-open files) while `du` only sums files still visible in the directory tree — a mismatch between them is the classic symptom of this exact issue, and restarting/reloading the holding process is what finally releases the space.")
+
+add("Run and interpret fsck on an unmounted filesystem", "INTER", "Troubleshooting",
+    "Check and repair filesystem inconsistencies after an unclean shutdown.",
+    ["sudo umount /dev/sdb1", "sudo fsck -f /dev/sdb1",
+     "sudo mount /dev/sdb1 /data"],
+    "WHY IT WORKS: fsck (filesystem check) walks metadata structures (inodes, block/free lists, directory entries) looking for inconsistencies, typically after an unclean shutdown; -f forces a full check even if the filesystem appears clean. WHY A VARIANT FAILS: running fsck on a MOUNTED, actively-written filesystem can corrupt it further since the live filesystem and the checker can disagree about current state — always unmount (or boot to rescue/emergency mode for root) first.")
+
+add("Diagnose LVM logical volume that won't activate", "ADV", "Troubleshooting",
+    "Recover an inactive LVM volume group after a disk was reattached.",
+    ["sudo vgscan", "sudo vgchange -ay vg_data",
+     "sudo lvs -o +devices", "sudo mount /dev/vg_data/lv_app /app"],
+    "WHY IT WORKS: `vgscan` rebuilds the LVM metadata cache after devices change (e.g. disk moved, VM disk reattached); `vgchange -ay` activates all logical volumes in the group so their device-mapper nodes appear under /dev again before they can be mounted. WHY A VARIANT FAILS: attempting to mount an LVM path directly after a metadata rescan without activating the VG first fails with 'special device does not exist' because the /dev/mapper node isn't created until activation.")
+
+add("Investigate high CPU load with top/vmstat", "CORE", "Troubleshooting",
+    "Identify whether load is CPU-bound, I/O-bound, or memory-bound.",
+    ["uptime", "top -o %CPU", "vmstat 1 5"],
+    "WHY IT WORKS: `uptime`'s load average reflects the number of runnable+blocked processes; `vmstat` breaks that down into columns for CPU (user/system/idle/wait), showing whether high load comes from actual CPU work (us/sy) or from processes blocked on I/O (wa). WHY IT MATTERS: a high load average alone doesn't tell you WHY — high 'wa' time points to disk/network bottlenecks, not a CPU shortage, and needs a completely different fix.")
+
+add("Diagnose I/O bottlenecks with iostat", "ADV", "Troubleshooting",
+    "Identify which disk device is saturated and how.",
+    ["sudo iostat -xz 1 5", "iotop -o"],
+    "WHY IT WORKS: `iostat -x` shows extended per-device stats including %util (how busy the device is) and await (average I/O wait time); `iotop` attributes I/O to specific processes in real time, unlike iostat's device-level view. WHY IT MATTERS: %util near 100% with high await indicates the disk itself is the bottleneck, whereas low %util with high await usually points to a queueing or driver issue further up the stack.")
+
+add("Investigate memory pressure and OOM kills", "ADV", "Troubleshooting",
+    "Confirm the kernel OOM killer terminated a process and find the trigger.",
+    ["free -h", "dmesg -T | grep -i 'out of memory'",
+     "journalctl -k --since '1 hour ago' | grep -i oom",
+     "grep -i oom_score /proc/*/status 2>/dev/null"],
+    "WHY IT WORKS: `free -h` shows current memory/swap pressure; the kernel logs OOM killer activity to dmesg/journal with the victim's PID, name and the oom_score that made it the chosen target. WHY A VARIANT FAILS: assuming the process reported as 'Killed' is itself the memory leak — the OOM killer often kills the highest-oom_score process, which may be a victim of a DIFFERENT process's leak, not the actual root cause. WHY IT MATTERS: adjusting a critical service's /proc/<pid>/oom_score_adj downward makes the kernel less likely to pick it during future OOM events.")
+
+add("Show and inspect network interfaces and routes", "CORE", "Troubleshooting",
+    "Verify interface state, IP configuration and the routing table.",
+    ["ip a", "ip r", "ip link show"],
+    "WHY IT WORKS: `ip a` (addr) shows interface state (UP/DOWN) and assigned addresses; `ip r` (route) shows the routing table including the default gateway. These replace the deprecated `ifconfig`/`route` commands with a unified, scriptable tool. WHY IT MATTERS: `ifconfig` is legacy and may not even be installed on modern minimal distros — the exam still references it as a 'classic equivalent' but `ip` is the current standard.")
+
+add("Inspect socket and listening port state with ss", "CORE", "Troubleshooting",
+    "Confirm which process is listening on which port.",
+    ["sudo ss -tulpn", "ss -s"],
+    "WHY IT WORKS: `ss` (socket statistics) is the modern replacement for `netstat`, reading directly from kernel netlink sockets rather than /proc, making it faster on systems with many connections; -tulpn shows TCP/UDP listeners with process names and PIDs. WHY IT MATTERS: if a service that should be listening doesn't show up in `ss -tulpn`, that immediately tells you the problem is the service itself failing to bind, not a firewall — narrowing the investigation fast.")
+
+add("Test connectivity with ping and traceroute", "CORE", "Troubleshooting",
+    "Diagnose whether a remote host is reachable and where a path breaks.",
+    ["ping -c 4 8.8.8.8", "traceroute 8.8.8.8", "mtr -rw 8.8.8.8"],
+    "WHY IT WORKS: `ping` confirms basic ICMP reachability and measures latency/loss; `traceroute` reveals each hop along the path by exploiting TTL-expiry ICMP messages, showing exactly where connectivity breaks. `mtr` combines both into a continuously-updating view. WHY A VARIANT FAILS: some networks/firewalls block ICMP entirely, so a failed ping doesn't necessarily mean the host or service is down — always cross-check with a protocol-specific test like `curl` or `nc` on the actual service port.")
+
+add("Resolve DNS issues with dig/nslookup", "INTER", "Troubleshooting",
+    "Diagnose a name resolution failure and inspect the resolver config.",
+    ["dig example.com", "dig example.com +short",
+     "nslookup example.com", "cat /etc/resolv.conf"],
+    "WHY IT WORKS: `dig` gives detailed, protocol-accurate DNS query output including which server answered and the TTL; /etc/resolv.conf lists the nameservers actually being queried. WHY A VARIANT FAILS: on systems using NetworkManager or systemd-resolved, /etc/resolv.conf may be a symlink to a stub resolver — editing it directly can be overwritten automatically; use `resolvectl status` or nmcli to change DNS settings persistently instead.")
+
+add("Manage network connections with nmcli", "INTER", "Troubleshooting",
+    "Inspect and set a static IP using NetworkManager's CLI.",
+    ["nmcli device status", "nmcli connection show",
+     "sudo nmcli connection modify eth0 ipv4.addresses 192.168.1.50/24 ipv4.gateway 192.168.1.1 ipv4.dns 8.8.8.8 ipv4.method manual",
+     "sudo nmcli connection up eth0"],
+    "WHY IT WORKS: NetworkManager (nmcli) is the modern network configuration layer on most current distros, replacing manual /etc/network/interfaces or ifcfg-* file editing; `connection modify` stages changes that only take effect after `connection up` re-activates the profile. WHY A VARIANT FAILS: editing the underlying ifcfg/keyfile directly while NetworkManager is managing the interface can be overwritten or ignored — use nmcli (or a GUI/TUI front end) as the source of truth when NetworkManager owns the interface.")
+
+add("Test a specific service port with curl/nc", "CORE", "Troubleshooting",
+    "Verify a web service and a raw TCP port are actually reachable.",
+    ["curl -I https://example.com", "curl -v telnet://example.com:443",
+     "nc -zv example.com 443"],
+    "WHY IT WORKS: `curl -I` fetches just the HTTP headers to confirm the service answers correctly at the application layer; `nc -zv` (zero-I/O mode, verbose) tests pure TCP reachability on a port without speaking any application protocol, isolating network-layer from application-layer failures. WHY IT MATTERS: a successful `nc` connection but a failing `curl` narrows the problem to the application (misconfigured vhost, TLS cert, etc.) rather than the network path or firewall.")
+
+add("Read and follow application logs", "CORE", "Troubleshooting",
+    "Tail a log file live and filter for error patterns.",
+    ["tail -f /var/log/nginx/error.log",
+     "grep -i 'error\\|fail' /var/log/nginx/error.log | tail -50"],
+    "WHY IT WORKS: `tail -f` follows a growing file in real time, showing new lines as they're appended — essential for watching an issue happen live. Piping through grep with a case-insensitive alternation pattern filters noise down to actionable lines. WHY IT MATTERS: on systemd-based distros many services log ONLY to the journal, not to /var/log files, so `journalctl -u <service> -f` may be needed instead of tail -f when no log file exists at all.")
+
+add("Read kernel ring buffer messages with dmesg", "INTER", "Troubleshooting",
+    "Diagnose a hardware or driver issue reported directly by the kernel.",
+    ["dmesg -T | tail -50", "dmesg -T | grep -i error",
+     "dmesg --level=err,warn"],
+    "WHY IT WORKS: dmesg reads the kernel's ring buffer, capturing low-level events (hardware detection, driver errors, filesystem/journal issues, OOM kills) that never reach userspace logs; -T converts raw kernel timestamps into human-readable time. WHY IT MATTERS: the ring buffer has a fixed size and wraps — on a long-running system the earliest boot messages may already be gone, so persistent kernel logging (via journald storage) is needed to review events from far in the past.")
+
+add("Identify and clean up zombie and orphan processes", "ADV", "Troubleshooting",
+    "Diagnose processes stuck in the Z (zombie) state.",
+    ["ps aux | awk '$8 ~ /Z/ {print}'",
+     "ps -o pid,ppid,state,cmd -p <zombie_pid>",
+     "kill -SIGCHLD <parent_pid>"],
+    "WHY IT WORKS: a zombie (state Z) is a process that has already exited but whose exit status hasn't yet been read (wait()'d) by its parent — it holds no real resources except its process table entry. Sending SIGCHLD nudges a parent that failed to reap children into doing so. WHY A VARIANT FAILS: trying to `kill -9` a zombie process does nothing useful — it's already dead; the fix must target the PARENT process (make it reap the child, or restart/kill the parent if it's the one that's buggy), not the zombie's own PID.")
+
+add("Diagnose a 'permission denied' error methodically", "INTER", "Troubleshooting",
+    "Work through the layered causes of an access failure.",
+    ["ls -ld /srv/app/data", "id www-data",
+     "getfacl /srv/app/data", "getenforce",
+     "ls -Z /srv/app/data"],
+    "WHY IT WORKS: permission failures can come from several independent layers — traditional owner/group/other bits, ACLs (getfacl), and mandatory access control like SELinux (ls -Z, getenforce) — and each must be checked because any ONE of them can block access even if the others look fine. WHY A VARIANT FAILS: fixing only the traditional chmod/chown bits and declaring victory, without checking `getenforce`/`ls -Z`, misses that SELinux is silently the real blocker — a very common troubleshooting dead end on RHEL-family systems.")
+
+add("Recover from a full root filesystem", "ADV", "Troubleshooting",
+    "Free space on / without a full reboot when the system becomes unresponsive.",
+    ["sudo du -sh /var/log/* | sort -rh | head",
+     "sudo journalctl --vacuum-size=200M",
+     "sudo find /var/tmp -type f -atime +14 -delete"],
+    "WHY IT WORKS: `journalctl --vacuum-size` trims the persistent systemd journal down to a target size, often the single biggest quick win on a log-heavy server; targeted deletion of old temp files frees space without guessing blindly. WHY IT MATTERS: a completely full root filesystem can prevent even login or sudo from working (no space to write lock files/session data), so on a severely full disk you may need to boot into rescue mode and clean up from there instead of trying to fix it live.")
+
+add("Boot-time troubleshooting: analyze slow startup", "ADV", "Troubleshooting",
+    "Find which systemd unit is delaying boot the most.",
+    ["systemd-analyze", "systemd-analyze blame",
+     "systemd-analyze critical-chain"],
+    "WHY IT WORKS: `systemd-analyze blame` ranks every unit by how long it took to initialize, and `critical-chain` shows the dependency chain that determined total boot time — together they pinpoint whether the delay is one slow unit or a long serial dependency chain. WHY IT MATTERS: a unit high in 'blame' isn't always the real problem if it runs in parallel with everything else — 'critical-chain' is what actually shows what's on the critical path holding up the finish line.")
+
+add("Diagnose a service that fails to start", "CORE", "Troubleshooting",
+    "Work through systemctl status and journal output to find the root cause.",
+    ["systemctl status myapp", "journalctl -u myapp -n 50 --no-pager",
+     "systemctl show myapp -p ExecStart"],
+    "WHY IT WORKS: `systemctl status` gives the immediate failure reason and recent log tail inline; a fuller `journalctl -u` history often reveals the actual root-cause exception the short status view truncates; `systemctl show -p ExecStart` confirms exactly what command systemd is trying to run, ruling out a wrong path/argument in the unit file. WHY IT MATTERS: 'status=1/FAILURE' from systemctl alone rarely explains WHY — the real reason is almost always in the fuller journal output, not the one-line summary.")
+
+add("Diagnose slow DNS or intermittent name resolution", "INTER", "Troubleshooting",
+    "Determine whether a resolver, not the destination, is the real problem.",
+    ["dig +trace example.com",
+     "resolvectl status",
+     "time dig @8.8.8.8 example.com"],
+    "WHY IT WORKS: `dig +trace` walks the delegation chain from the root servers down, isolating exactly which level (root, TLD, authoritative) is slow or unresponsive; querying a known-good public resolver directly (@8.8.8.8) bypasses the local resolver to test whether the LOCAL resolver configuration itself is the bottleneck. WHY IT MATTERS: intermittent DNS failures are often caused by a flaky or overloaded local/corporate resolver, not the destination site — bypassing it with a direct query is the fastest way to prove or disprove that.")
+
+print("total samples:", len(S))
+assert len(S) == 100, f"expected 100 samples, got {len(S)}"
+assert all(s.get("explain") for s in S), "missing explanation"
+print("explanations:", sum(1 for s in S if s.get("explain")))
+
+js = "window.LINUX_SAMPLES = " + json.dumps(S, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/") + ";"
+with open("/home/user/workspace/certprep_single/linux_samples.js", "w", encoding="utf-8") as f:
+    f.write(js)
+print("wrote linux_samples.js", len(js), "bytes")
+
+# level / category breakdown for reporting
+from collections import Counter
+lvl_counts = Counter(s["level"] for s in S)
+cat_counts = Counter(s["cat"] for s in S)
+print("levels:", dict(lvl_counts))
+print("categories:", dict(cat_counts))
